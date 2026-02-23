@@ -1,0 +1,20 @@
+{
+  "fetcher_script": "/Users/drzzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
+  "dedup_db": "./data/seen_tweets.db",
+  "max_new_items": 25,
+  "per_source_limit": 20,
+  "nitter_instances": [
+    "https://nitter.net",
+    "https://nitter.privacydev.net"
+  ],
+  "following_handles": [
+    "unusual_whales",
+    "zerohedge",
+    "TheTranscript_"
+  ],
+  "feed_keywords": [
+    "stocks earnings guidance",
+    "macro cpi fed rates",
+    "options flow gamma"
+  ]
+}
