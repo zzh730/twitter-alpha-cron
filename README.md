@@ -10,7 +10,7 @@
 ## 1) Setup
 
 ```bash
-cd /Users/drzzh/.openclaw/workspace/twitter-alpha-cron
+cd /Users/zzh/projects/twitter-alpha-cron
 cp config.example.yaml config.yaml
 ```
 

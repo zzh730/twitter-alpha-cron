@@ -1,5 +1,5 @@
 {
-  "fetcher_script": "/Users/drzzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
+  "fetcher_script": "/Users/zzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
   "dedup_db": "./data/seen_tweets.db",
   "max_new_items": 25,
   "per_source_limit": 20,

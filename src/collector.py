@@ -126,7 +126,47 @@ def _fetch_tweet_details(fetcher_script: str, url: str) -> Dict:
     p = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if p.returncode != 0:
         raise RuntimeError(p.stderr.strip() or p.stdout.strip() or "fetch_tweet failed")
-    return json.loads(p.stdout)
+
+    try:
+        data = json.loads(p.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"fetch_tweet returned invalid JSON: {p.stdout[:300]}") from e
+
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+
+    return data
+
+
+def _author_name(tweet: Dict) -> str:
+    author = tweet.get("author", "")
+    if isinstance(author, dict):
+        return author.get("name", "")
+    return author or ""
+
+
+def _screen_name(tweet: Dict, details: Dict) -> str:
+    screen_name = tweet.get("screen_name", "")
+    if screen_name:
+        return screen_name
+
+    author = tweet.get("author", "")
+    if isinstance(author, dict):
+        return author.get("screen_name", "")
+
+    return details.get("username", "")
+
+
+def _extract_text(tweet: Dict) -> str:
+    if tweet.get("is_article"):
+        article = tweet.get("article", {})
+        full_text = article.get("full_text", "")
+        if full_text:
+            return full_text
+        preview = article.get("preview_text", "")
+        if preview:
+            return preview
+    return tweet.get("text", "") or ""
 
 
 def _format_markdown(items: List[Dict]) -> str:
@@ -175,20 +215,27 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
                 if store.is_seen(tweet_id):
                     continue
 
-                text = tweet.get("article", {}).get("full_text") if tweet.get("is_article") else tweet.get("text", "")
-                if not _is_financial_relevant(text or ""):
+                text = _extract_text(tweet)
+                if not _is_financial_relevant(text):
                     continue
 
-                analysis = analyze_text(text or "")
+                analysis = analyze_text(text)
 
                 record = {
                     "url": c.url,
                     "tweet_id": tweet_id,
                     "source": c.source,
-                    "author": tweet.get("author", ""),
-                    "screen_name": tweet.get("screen_name", details.get("username", "")),
+                    "author": _author_name(tweet),
+                    "screen_name": _screen_name(tweet, details),
                     "created_at": tweet.get("created_at", ""),
-                    "text": text or "",
+                    "text": text,
+                    "likes": tweet.get("likes", 0),
+                    "retweets": tweet.get("retweets", 0),
+                    "views": tweet.get("views", 0),
+                    "replies_count": tweet.get("replies_count", tweet.get("replies", 0)),
+                    "is_note_tweet": tweet.get("is_note_tweet", False),
+                    "lang": tweet.get("lang", ""),
+                    "quote": tweet.get("quote"),
                     **analysis,
                 }
                 out.append(record)
