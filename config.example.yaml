@@ -1,6 +1,11 @@
 {
-  "fetcher_script": "/Users/zzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
+  "x_fetcher_repo_dir": "./third_party/x_tweet_fetcher",
+  "fetcher_script": "./third_party/x_tweet_fetcher/scripts/fetch_tweet.py",
+  "camofox_port": 9377,
   "dedup_db": "./data/seen_tweets.db",
+  "discover_cache": "./data/x_discover_cache.json",
+  "discover_fresh": true,
+  "prefer_repo_discovery": true,
   "max_new_items": 25,
   "per_source_limit": 20,
   "nitter_instances": [

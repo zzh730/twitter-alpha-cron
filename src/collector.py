@@ -2,7 +2,9 @@ import argparse
 import datetime as dt
 import json
 import logging
+import re
 import subprocess
+import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -30,6 +32,8 @@ def _is_financial_relevant(text: str) -> bool:
 class CandidateTweet:
     url: str
     source: str  # following|feed
+    tweet_id: str = ""
+    author_handle: str = ""
 
 
 def _load_config(path: str) -> Dict:
@@ -68,48 +72,285 @@ def _normalize_x_url(url: str) -> str:
     return f"https://x.com{u.path}"
 
 
-def _collect_candidates(config: Dict) -> List[CandidateTweet]:
-    instances = config.get("nitter_instances", [])
-    following = config.get("following_handles", [])
-    keywords = config.get("feed_keywords", [])
-    per_source_limit = int(config.get("per_source_limit", 30))
+def _tweet_id_from_url(url: str) -> str:
+    m = re.search(r"/status/(\d+)", url)
+    return m.group(1) if m else ""
 
+
+def _normalize_nitter_host(instance: str) -> str:
+    instance = instance.strip()
+    if not instance:
+        return "nitter.net"
+    if "://" not in instance:
+        return instance.strip("/")
+    return urllib.parse.urlparse(instance).netloc or "nitter.net"
+
+
+def _fetcher_repo_candidates(config: Dict) -> List[Path]:
+    root = Path(__file__).resolve().parent.parent
+    candidates: List[Path] = []
+
+    repo_dir = config.get("x_fetcher_repo_dir", "")
+    if repo_dir:
+        candidates.append(Path(repo_dir).expanduser())
+
+    fetcher_script = config.get("fetcher_script", "")
+    if fetcher_script:
+        script_path = Path(fetcher_script).expanduser()
+        if script_path.parent.name == "scripts":
+            candidates.append(script_path.parent.parent)
+
+    candidates.append(root / "third_party" / "x_tweet_fetcher")
+    candidates.append(root / "vendor" / "x-tweet-fetcher")
+    return candidates
+
+
+def _resolve_fetcher_paths(config: Dict) -> Tuple[str, str]:
+    configured_fetcher = config.get("fetcher_script", "")
+    configured_path = Path(configured_fetcher).expanduser() if configured_fetcher else None
+
+    for repo in _fetcher_repo_candidates(config):
+        fetcher = repo / "scripts" / "fetch_tweet.py"
+        discover = repo / "scripts" / "x_discover.py"
+        if fetcher.exists() and discover.exists():
+            return str(fetcher), str(discover)
+
+    if configured_path and configured_path.exists():
+        repo = configured_path.parent.parent if configured_path.parent.name == "scripts" else None
+        discover = repo / "scripts" / "x_discover.py" if repo else None
+        return str(configured_path), str(discover) if discover and discover.exists() else ""
+
+    for repo in _fetcher_repo_candidates(config):
+        fetcher = repo / "scripts" / "fetch_tweet.py"
+        if fetcher.exists():
+            return str(fetcher), ""
+
+    return configured_fetcher, ""
+
+
+def _run_json_command(cmd: List[str], ok_returncodes: Tuple[int, ...] = (0,)) -> Dict:
+    p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if p.returncode not in ok_returncodes:
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip() or f"command failed: {' '.join(cmd)}")
+
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"command returned invalid JSON: {p.stdout[:300]}") from e
+
+
+def _collect_following_via_fetcher(
+    fetcher_script: str,
+    handles: List[str],
+    per_source_limit: int,
+    camofox_port: int,
+    nitter_instances: List[str],
+) -> Tuple[List[CandidateTweet], List[str]]:
     candidates: List[CandidateTweet] = []
+    failed_handles: List[str] = []
+    nitter_hosts = [_normalize_nitter_host(inst) for inst in nitter_instances] or ["nitter.net"]
 
-    # following first
-    for handle in following:
+    for handle in handles:
         fetched = False
-        for inst in instances:
+        for nitter_host in nitter_hosts:
+            cmd = [
+                sys.executable,
+                fetcher_script,
+                "--user",
+                handle,
+                "--limit",
+                str(per_source_limit),
+                "--port",
+                str(camofox_port),
+                "--nitter",
+                nitter_host,
+                "--lang",
+                "en",
+            ]
+            try:
+                data = _run_json_command(cmd)
+                if data.get("error"):
+                    raise RuntimeError(data["error"])
+
+                for tweet in data.get("tweets", []):
+                    tweet_id = str(tweet.get("tweet_id", "")).strip()
+                    author_handle = (tweet.get("author", "") or "").lstrip("@")
+                    if not tweet_id or not author_handle:
+                        continue
+                    candidates.append(
+                        CandidateTweet(
+                            url=f"https://x.com/{author_handle}/status/{tweet_id}",
+                            source="following",
+                            tweet_id=tweet_id,
+                            author_handle=author_handle,
+                        )
+                    )
+                fetched = True
+                break
+            except Exception as e:
+                logging.warning(
+                    "timeline fetch failed for %s via %s: %s",
+                    handle,
+                    nitter_host,
+                    e,
+                )
+        if not fetched:
+            failed_handles.append(handle)
+
+    return candidates, failed_handles
+
+
+def _collect_following_via_rss(
+    nitter_instances: List[str],
+    handles: List[str],
+    per_source_limit: int,
+) -> List[CandidateTweet]:
+    candidates: List[CandidateTweet] = []
+    for handle in handles:
+        fetched = False
+        for inst in nitter_instances:
             url = f"{inst.rstrip('/')}/{handle}/rss"
             try:
                 xml_text = _safe_fetch(url)
                 links = _parse_rss_links(xml_text)[:per_source_limit]
                 for link in links:
-                    candidates.append(CandidateTweet(url=_normalize_x_url(link), source="following"))
+                    normalized = _normalize_x_url(link)
+                    candidates.append(
+                        CandidateTweet(
+                            url=normalized,
+                            source="following",
+                            tweet_id=_tweet_id_from_url(normalized),
+                            author_handle=handle,
+                        )
+                    )
                 fetched = True
                 break
             except Exception as e:
                 logging.warning("following RSS failed for %s via %s: %s", handle, inst, e)
         if not fetched:
             logging.warning("all nitter instances failed for handle=%s", handle)
+    return candidates
 
-    # feed fallback
+
+def _collect_keywords_via_discover(
+    discover_script: str,
+    keywords: List[str],
+    per_source_limit: int,
+    discover_cache: str,
+    discover_fresh: bool,
+) -> Tuple[List[CandidateTweet], bool]:
+    if not keywords:
+        return [], True
+
+    cmd = [
+        sys.executable,
+        discover_script,
+        "--keywords",
+        ",".join(keywords),
+        "--limit",
+        str(per_source_limit),
+        "--json",
+    ]
+    if discover_cache:
+        cmd.extend(["--cache", discover_cache])
+    if discover_fresh:
+        cmd.append("--fresh")
+
+    try:
+        data = _run_json_command(cmd, ok_returncodes=(0, 1))
+    except Exception as e:
+        logging.warning("x_discover failed: %s", e)
+        return [], False
+
+    candidates: List[CandidateTweet] = []
+    for found in data.get("finds", []):
+        url = found.get("url", "")
+        if "/status/" not in url:
+            continue
+        normalized = _normalize_x_url(url)
+        candidates.append(
+            CandidateTweet(
+                url=normalized,
+                source="feed",
+                tweet_id=_tweet_id_from_url(normalized),
+            )
+        )
+    return candidates, bool(candidates)
+
+
+def _collect_keywords_via_rss(
+    nitter_instances: List[str],
+    keywords: List[str],
+    per_source_limit: int,
+) -> List[CandidateTweet]:
+    candidates: List[CandidateTweet] = []
     for kw in keywords:
         q = urllib.parse.quote_plus(kw)
         fetched = False
-        for inst in instances:
+        for inst in nitter_instances:
             url = f"{inst.rstrip('/')}/search/rss?f=tweets&q={q}"
             try:
                 xml_text = _safe_fetch(url)
                 links = _parse_rss_links(xml_text)[:per_source_limit]
                 for link in links:
-                    candidates.append(CandidateTweet(url=_normalize_x_url(link), source="feed"))
+                    normalized = _normalize_x_url(link)
+                    candidates.append(
+                        CandidateTweet(
+                            url=normalized,
+                            source="feed",
+                            tweet_id=_tweet_id_from_url(normalized),
+                        )
+                    )
                 fetched = True
                 break
             except Exception as e:
                 logging.warning("feed RSS failed for query=%s via %s: %s", kw, inst, e)
         if not fetched:
             logging.warning("all nitter instances failed for keyword=%s", kw)
+    return candidates
+
+
+def _collect_candidates(config: Dict, fetcher_script: str, discover_script: str) -> List[CandidateTweet]:
+    instances = config.get("nitter_instances", [])
+    following = config.get("following_handles", [])
+    keywords = config.get("feed_keywords", [])
+    per_source_limit = int(config.get("per_source_limit", 30))
+    camofox_port = int(config.get("camofox_port", 9377))
+    discover_cache = config.get("discover_cache", "./data/x_discover_cache.json")
+    discover_fresh = bool(config.get("discover_fresh", True))
+    prefer_repo_discovery = bool(config.get("prefer_repo_discovery", True))
+
+    candidates: List[CandidateTweet] = []
+
+    # following first: prefer timeline fetch via x-tweet-fetcher + Camofox, then fall back to RSS.
+    failed_handles = following
+    if prefer_repo_discovery and fetcher_script and following:
+        following_candidates, failed_handles = _collect_following_via_fetcher(
+            fetcher_script=fetcher_script,
+            handles=following,
+            per_source_limit=per_source_limit,
+            camofox_port=camofox_port,
+            nitter_instances=instances,
+        )
+        candidates.extend(following_candidates)
+
+    if failed_handles:
+        candidates.extend(_collect_following_via_rss(instances, failed_handles, per_source_limit))
+
+    # keyword discovery: prefer x_discover, fall back to RSS if the script/backends fail.
+    discover_ok = False
+    if prefer_repo_discovery and discover_script and keywords:
+        feed_candidates, discover_ok = _collect_keywords_via_discover(
+            discover_script=discover_script,
+            keywords=keywords,
+            per_source_limit=per_source_limit,
+            discover_cache=discover_cache,
+            discover_fresh=discover_fresh,
+        )
+        candidates.extend(feed_candidates)
+
+    if keywords and not discover_ok:
+        candidates.extend(_collect_keywords_via_rss(instances, keywords, per_source_limit))
 
     # dedup preserving priority/order
     seen = set()
@@ -193,7 +434,9 @@ def _format_markdown(items: List[Dict]) -> str:
 def run(config_path: str) -> Tuple[List[Dict], str]:
     config = _load_config(config_path)
 
-    fetcher_script = config["fetcher_script"]
+    fetcher_script, discover_script = _resolve_fetcher_paths(config)
+    if not fetcher_script:
+        raise ValueError("No fetcher_script found. Set fetcher_script or x_fetcher_repo_dir in config.")
     max_new_items = int(config.get("max_new_items", 30))
     db_path = config.get("dedup_db", "./data/seen_tweets.db")
 
@@ -202,16 +445,19 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
     now = dt.datetime.now(dt.timezone.utc).isoformat()
 
     try:
-        candidates = _collect_candidates(config)
+        candidates = _collect_candidates(config, fetcher_script, discover_script)
         logging.info("collected %d candidates", len(candidates))
 
         for c in candidates:
             if len(out) >= max_new_items:
                 break
+            candidate_tweet_id = c.tweet_id or _tweet_id_from_url(c.url)
+            if candidate_tweet_id and store.is_seen(candidate_tweet_id):
+                continue
             try:
                 details = _fetch_tweet_details(fetcher_script, c.url)
                 tweet = details.get("tweet", {})
-                tweet_id = details.get("tweet_id") or c.url.rsplit("/", 1)[-1]
+                tweet_id = details.get("tweet_id") or candidate_tweet_id or c.url.rsplit("/", 1)[-1]
                 if store.is_seen(tweet_id):
                     continue
 

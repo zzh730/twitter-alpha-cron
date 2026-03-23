@@ -1,4 +1,7 @@
 config.yaml
 data/
-__pycahe__
-**/__pycahe__
+__pycahe__/**
+**/__pycahe__/**
+__pycache__/
+**/__pycache__/
+vendor/x-tweet-fetcher/
