@@ -22,6 +22,27 @@ FIN_KEYWORDS = {
     "bitcoin", "btc", "ethereum", "eth", "crypto", "oil", "brent", "wti",
 }
 
+SOURCE_LABELS = {
+    "following": "重点观察",
+    "feed": "关键词发现",
+}
+
+SENTIMENT_LABELS = {
+    "bullish": "偏多",
+    "bearish": "偏空",
+    "neutral": "中性",
+}
+
+MACRO_TAG_LABELS = {
+    "fed": "美联储",
+    "inflation": "通胀",
+    "labor": "就业",
+    "growth": "增长",
+    "energy": "能源",
+    "geopolitics": "地缘政治",
+    "crypto": "加密资产",
+}
+
 
 def _is_financial_relevant(text: str) -> bool:
     lower = text.lower()
@@ -410,24 +431,164 @@ def _extract_text(tweet: Dict) -> str:
     return tweet.get("text", "") or ""
 
 
-def _format_markdown(items: List[Dict]) -> str:
-    if not items:
-        return "No new tweets after dedup."
+def _normalize_handle(handle: str) -> str:
+    return (handle or "").strip().lstrip("@").lower()
 
-    lines = ["# X Trading/Investing Feed", ""]
-    for i, it in enumerate(items, start=1):
-        lines.extend(
-            [
-                f"## {i}. {it['author']} (@{it['screen_name']}) [{it['source']}]",
-                f"- URL: {it['url']}",
-                f"- Time: {it['created_at']}",
-                f"- Sentiment: {it['sentiment']} (score={it['sentiment_score']})",
-                f"- Tickers: {', '.join(it['tickers']) if it['tickers'] else 'None'}",
-                f"- Macro tags: {', '.join(it['macro_tags']) if it['macro_tags'] else 'None'}",
-                f"- Text: {it['text'].replace(chr(10), ' ')}",
-                "",
-            ]
-        )
+
+def _format_text_line(text: str) -> str:
+    return (text or "").replace(chr(10), " ").strip()
+
+
+def _format_number(value) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _join_or_default(values: List[str], default: str = "无") -> str:
+    cleaned = [str(v).strip() for v in values if str(v).strip()]
+    return "、".join(cleaned) if cleaned else default
+
+
+def _format_macro_tags(tags: List[str]) -> str:
+    translated = [MACRO_TAG_LABELS.get(tag, tag) for tag in tags]
+    return _join_or_default(translated)
+
+
+def _is_target_user(item: Dict, target_handles: List[str]) -> bool:
+    handle = _normalize_handle(item.get("screen_name", ""))
+    targets = {_normalize_handle(h) for h in target_handles}
+    return item.get("source") == "following" or (handle in targets if handle else False)
+
+
+def _market_focus_label(item: Dict) -> str:
+    macro_tags = item.get("macro_tags", [])
+    tickers = item.get("tickers", [])
+    if tickers:
+        return f"相关标的集中在 {_join_or_default(tickers)}"
+    if macro_tags:
+        return f"重点落在 {_format_macro_tags(macro_tags)}"
+    return "更偏向情绪/观点表达"
+
+
+def _sentiment_cn(sentiment: str) -> str:
+    return SENTIMENT_LABELS.get(sentiment, "中性")
+
+
+def _per_tweet_market_view(item: Dict) -> str:
+    sentiment = _sentiment_cn(item.get("sentiment", "neutral"))
+    score = item.get("sentiment_score", 0)
+    tickers = item.get("tickers", [])
+    macro_tags = item.get("macro_tags", [])
+
+    if score >= 2:
+        stance = "这条更像是在强化做多/风险偏好回升的交易叙事"
+    elif score <= -2:
+        stance = "这条更像是在强化防守、回撤或做空方向的交易叙事"
+    else:
+        stance = "这条更多是在提供观察点，方向性没有那么极端"
+
+    focus = _market_focus_label(item)
+    macro_view = ""
+    if macro_tags:
+        macro_view = f"，并把市场注意力引向 {_format_macro_tags(macro_tags)}"
+
+    return f"{stance}；作者当前语气为{sentiment}{macro_view}；{focus}。"
+
+
+def _author_holistic_view(author_items: List[Dict]) -> str:
+    total_score = sum(int(it.get("sentiment_score", 0)) for it in author_items)
+    all_tickers: List[str] = []
+    all_macro_tags: List[str] = []
+    for item in author_items:
+        all_tickers.extend(item.get("tickers", []))
+        all_macro_tags.extend(item.get("macro_tags", []))
+
+    if total_score >= 2:
+        stance = "整体偏多，倾向强调上涨驱动、风险偏好或顺势交易机会"
+    elif total_score <= -2:
+        stance = "整体偏空，倾向强调风险释放、防守或下行交易机会"
+    else:
+        stance = "整体偏中性，更像是在给市场做信息补充和节奏提示"
+
+    focus_parts = []
+    if all_tickers:
+        focus_parts.append(f"核心标的是 {_join_or_default(sorted(set(all_tickers)))}")
+    if all_macro_tags:
+        focus_parts.append(f"核心主题是 {_format_macro_tags(sorted(set(all_macro_tags)))}")
+    if not focus_parts:
+        focus_parts.append("内容更偏向盘面情绪、消息流或交易节奏")
+
+    return f"{stance}；{ '；'.join(focus_parts) }。"
+
+
+def _format_item_lines(item: Dict, index: int, include_trading_view: bool) -> List[str]:
+    lines = [
+        f"#### {index}. {item['author']} (@{item['screen_name']})",
+        f"- 来源：{SOURCE_LABELS.get(item['source'], item['source'])}",
+        f"- 链接：{item['url']}",
+        f"- 时间：{item['created_at'] or '未知'}",
+        f"- 情绪判断：{_sentiment_cn(item['sentiment'])}（score={item['sentiment_score']}）",
+        f"- 涉及标的：{_join_or_default(item['tickers'])}",
+        f"- 宏观主题：{_format_macro_tags(item['macro_tags'])}",
+        f"- 互动数据：点赞 {_format_number(item.get('likes'))} / 转推 {_format_number(item.get('retweets'))} / 回复 {_format_number(item.get('replies_count'))} / 浏览 {_format_number(item.get('views'))}",
+        f"- 原文：{_format_text_line(item['text'])}",
+    ]
+    if include_trading_view:
+        lines.append(f"- 交易/市场解读：{_per_tweet_market_view(item)}")
+    lines.append("")
+    return lines
+
+
+def _format_markdown(items: List[Dict], target_handles: List[str]) -> str:
+    if not items:
+        return "本轮去重后没有新的推文。"
+
+    target_set = {_normalize_handle(h) for h in target_handles}
+    target_items = [it for it in items if _is_target_user(it, target_handles)]
+    other_items = [it for it in items if not _is_target_user(it, target_handles)]
+
+    lines = ["# X 交易监控摘要", ""]
+
+    if target_items:
+        lines.extend(["## 重点观察账户", ""])
+        ordered_handles = []
+        seen_handles = set()
+        for handle in target_handles:
+            normalized = _normalize_handle(handle)
+            if normalized and normalized not in seen_handles:
+                ordered_handles.append(normalized)
+                seen_handles.add(normalized)
+        for item in target_items:
+            normalized = _normalize_handle(item.get("screen_name", ""))
+            if normalized and normalized not in seen_handles:
+                ordered_handles.append(normalized)
+                seen_handles.add(normalized)
+
+        block_index = 1
+        for handle in ordered_handles:
+            author_items = [it for it in target_items if _normalize_handle(it.get("screen_name", "")) == handle]
+            if not author_items:
+                continue
+            author_name = author_items[0].get("author") or handle
+            lines.extend(
+                [
+                    f"### {block_index}. {author_name} (@{handle})",
+                    f"- 本轮整体观点：{_author_holistic_view(author_items)}",
+                    f"- 新推文数：{len(author_items)}",
+                    "",
+                ]
+            )
+            for idx, item in enumerate(author_items, start=1):
+                lines.extend(_format_item_lines(item, idx, include_trading_view=True))
+            block_index += 1
+
+    if other_items:
+        lines.extend(["## 其他市场推文", ""])
+        for idx, item in enumerate(other_items, start=1):
+            lines.extend(_format_item_lines(item, idx, include_trading_view=False))
+
     return "\n".join(lines)
 
 
@@ -489,7 +650,7 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
             except Exception as e:
                 logging.warning("failed processing %s: %s", c.url, e)
 
-        return out, _format_markdown(out)
+        return out, _format_markdown(out, config.get("following_handles", []))
     finally:
         store.close()
 
