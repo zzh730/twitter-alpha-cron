@@ -25,5 +25,10 @@
     "stocks earnings guidance",
     "macro cpi fed rates",
     "options flow gamma"
-  ]
+  ],
+  "portfolio_monitor": {
+    "watchlist_url": "https://www.tradingview.com/watchlists/326877343/",
+    "snapshot_path": "./data/portfolio_snapshot.json",
+    "market_timezone": "America/New_York"
+  }
 }

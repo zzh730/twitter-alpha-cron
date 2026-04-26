@@ -1,1 +1,1 @@
-# stdlib-only by default
+pandas-market-calendars>=5.1

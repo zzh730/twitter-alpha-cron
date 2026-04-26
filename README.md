@@ -88,6 +88,30 @@ python3 schedule.py --interval 10m --config config.yaml --channel discord --to c
 python3 schedule.py --interval 1d --config config.yaml --channel discord --to channel:1475025575533084730
 ```
 
+## 4) TradingView Portfolio Monitor
+
+Portfolio monitor 会读取公开 TradingView watchlist，忽略 `###` 开头的分组标题，只比较真实持仓 symbol。
+
+手动检查一次（即使当前不是美股交易时间也抓取）：
+
+```bash
+python3 -m fetch_haohuang_portfolio.run_once --config config.yaml --force --include-no-change
+```
+
+安装 OpenClaw Discord cron：
+
+```bash
+python3 -m fetch_haohuang_portfolio.schedule --config config.yaml --channel discord --to channel:1475025575533084730
+```
+
+这个 cron 每 10 分钟在纽约时间工作日 9:00-16:59 之间唤醒一次，脚本内部会用 NYSE 日历做最终判断；非交易日、节假日、盘前和收盘后不会抓取或推送。
+
+Live E2E 测试会真的抓取 TradingView 页面：
+
+```bash
+RUN_TRADINGVIEW_E2E=1 python3 -m unittest tests/test_tradingview_portfolio_e2e.py
+```
+
 ## Notes
 
 - 优先 discovery 路径：timeline 用 `fetch_tweet.py --user`，keyword 用 `x_discover.py`。
