@@ -1,6 +1,14 @@
 # twitter-alpha-cron
 
-每次运行现在会优先用新版 `x-tweet-fetcher` 做两段式抓取：
+每次运行现在会优先用 TwitterAPI.io 拉取 X List 的最新推文：
+
+- `twitterapi_io.list_id`: 每 5 分钟拉取这个 X List 的最新内容
+- `TWITTERAPI_IO_KEY`: TwitterAPI.io API key，从环境变量读取
+- `poll_state_path`: 记录每个来源最新见过的 tweet id
+- 首次运行只建立 baseline，不发送历史推文
+- 后续运行会继续翻页，直到遇到已见过的 tweet id 或达到 `max_pages_per_run`
+
+如果没有配置 `twitterapi_io`，会退回旧的 `x-tweet-fetcher` 两段式抓取：
 
 - `following_handles`: 先走 `fetch_tweet.py --user <handle>`，通过 Camofox + Nitter 抓 timeline
 - `feed_keywords`: 先走 `x_discover.py --keywords ...`，优先用搜索发现 tweet URL
@@ -20,6 +28,10 @@ cp config.example.yaml config.yaml
 ```
 
 编辑 `config.yaml`：
+- `twitterapi_io.list_id`: 你要监控的 X List ID，例如 `1616825136690397187`
+- `TWITTERAPI_IO_KEY`: 放在环境变量里，不要写进配置文件
+- `twitterapi_io.max_pages_per_run`: 每轮最多翻几页；每页最多 20 条
+- `twitterapi_io.bootstrap_pages`: 首次建基线最多翻几页
 - `x_fetcher_repo_dir`: `x-tweet-fetcher` 路径；默认已指向 repo 内置的 `third_party/x_tweet_fetcher`
 - `following_handles`: 你想优先看的账户
 - `feed_keywords`: fallback 搜索词
@@ -76,6 +88,12 @@ python3 -m unittest tests/test_camofox_e2e.py
 python3 schedule.py --interval 1h --config config.yaml --channel discord --to channel:1475025575533084730
 ```
 
+### Every 5 minutes
+
+```bash
+python3 schedule.py --interval 5m --config config.yaml --channel discord --to channel:1475025575533084730
+```
+
 ### Every 10 minutes
 
 ```bash
@@ -114,7 +132,7 @@ RUN_TRADINGVIEW_E2E=1 python3 -m unittest tests/test_tradingview_portfolio_e2e.p
 
 ## Notes
 
-- 优先 discovery 路径：timeline 用 `fetch_tweet.py --user`，keyword 用 `x_discover.py`。
+- 优先路径：TwitterAPI.io list timeline。
 - `x-tweet-fetcher` 仍负责单条推文全文抓取。
 - Nitter 实例可用性会波动，建议配置多个实例。
 - dedup 依据 tweet_id 持久化，避免重复推送。

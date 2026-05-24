@@ -1,0 +1,31 @@
+{
+  "fetcher_script": "/Users/zzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
+  "dedup_db": "./data/seen_tweets.db",
+  "max_new_items": 25,
+  "per_source_limit": 20,
+  "nitter_instances": [
+    "https://nitter.net",
+    "https://nitter.cz",
+    "https://nitter.lucabased.xyz",
+    "https://nitter.1d4.us"
+  ],
+  "following_handles": [
+    "zerohedge",
+    "TheTranscript_",
+    "edgerunner17888",
+    "Balder13946731",
+    "labubu_trader",
+    "mat78704",
+    "ReyezAriel",
+    "TJ_Research",
+    "AntonLaVay",
+    "Adaamset",
+    "aleabitoreddit",
+    "david88lee"
+  ],
+  "feed_keywords": [
+    "stocks earnings guidance",
+    "macro cpi fed rates",
+    "options flow gamma"
+  ]
+}

@@ -1,23 +1,26 @@
 {
-  "fetcher_script": "/Users/drzzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
+  "twitterapi_io": {
+    "api_key_env": "TWITTERAPI_IO_KEY",
+    "list_id": "1616825136690397187",
+    "max_pages_per_run": 3,
+    "bootstrap_pages": 3,
+    "include_replies": false
+  },
+  "fetcher_script": "/Users/zzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
   "dedup_db": "./data/seen_tweets.db",
+  "poll_state_path": "./data/poll_state.json",
   "max_new_items": 25,
-  "per_source_limit": 20,
+  "per_source_limit": 5,
   "nitter_instances": [
-    "https://nitter.net",
-    "https://nitter.privacydev.net"
+    "https://nitter.net"
   ],
   "following_handles": [
-    "zerohedge",
-    "TheTranscript_",
     "edgerunner17888",
     "Balder13946731",
     "labubu_trader",
     "mat78704",
-    "ReyezAriel",
     "TJ_Research",
     "AntonLaVay",
-    "Adaamset",
     "aleabitoreddit",
     "david88lee"
   ],

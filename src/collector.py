@@ -2,6 +2,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -55,6 +56,79 @@ class CandidateTweet:
     source: str  # following|feed
     tweet_id: str = ""
     author_handle: str = ""
+    tweet: Dict = None
+
+
+@dataclass
+class TwitterApiPage:
+    tweets: List[Dict]
+    next_cursor: str = ""
+
+
+class PollState:
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self.data = self._load()
+
+    def _load(self) -> Dict:
+        if not self.path.exists():
+            return {"high_water": {}}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            logging.warning("poll state is invalid JSON; starting with empty state")
+            return {"high_water": {}}
+        if not isinstance(data, dict):
+            return {"high_water": {}}
+        data.setdefault("high_water", {})
+        return data
+
+    def get_high_water(self, key: str) -> str:
+        return str(self.data.get("high_water", {}).get(key, ""))
+
+    def set_high_water(self, key: str, tweet_id: str) -> None:
+        self.data.setdefault("high_water", {})[key] = str(tweet_id)
+        self.save()
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class TwitterApiIoClient:
+    BASE_URL = "https://api.twitterapi.io"
+
+    def __init__(self, api_key: str, timeout: int = 20):
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def _get(self, path: str, params: Dict[str, str]) -> Dict:
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in ("", None)})
+        url = f"{self.BASE_URL}{path}"
+        if query:
+            url = f"{url}?{query}"
+        req = urllib.request.Request(url, headers={"x-api-key": self.api_key, "User-Agent": "twitter-alpha-cron/1.0"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return json.loads(r.read().decode("utf-8", errors="ignore"))
+
+    def list_timeline(self, list_id: str, cursor: str = "") -> TwitterApiPage:
+        data = self._get("/twitter/list/tweets_timeline", {"listId": list_id, "cursor": cursor})
+        if data.get("status") == "error":
+            raise RuntimeError(data.get("message") or "twitterapi.io list timeline failed")
+        return TwitterApiPage(tweets=data.get("tweets", []), next_cursor=data.get("next_cursor", ""))
+
+    def user_last_tweets(self, user_name: str, cursor: str = "", include_replies: bool = False) -> TwitterApiPage:
+        data = self._get(
+            "/twitter/user/last_tweets",
+            {
+                "userName": user_name,
+                "cursor": cursor,
+                "includeReplies": "true" if include_replies else "false",
+            },
+        )
+        if data.get("status") == "error":
+            raise RuntimeError(data.get("message") or "twitterapi.io user last tweets failed")
+        return TwitterApiPage(tweets=data.get("tweets", []), next_cursor=data.get("next_cursor", ""))
 
 
 def _load_config(path: str) -> Dict:
@@ -96,6 +170,137 @@ def _normalize_x_url(url: str) -> str:
 def _tweet_id_from_url(url: str) -> str:
     m = re.search(r"/status/(\d+)", url)
     return m.group(1) if m else ""
+
+
+def _max_tweet_id(tweet_ids: List[str]) -> str:
+    numeric = [int(tid) for tid in tweet_ids if str(tid).isdigit()]
+    return str(max(numeric)) if numeric else ""
+
+
+def _tweet_id_newer(tweet_id: str, high_water: str) -> bool:
+    if not high_water:
+        return True
+    if str(tweet_id).isdigit() and str(high_water).isdigit():
+        return int(tweet_id) > int(high_water)
+    return tweet_id != high_water
+
+
+def _candidate_from_twitterapi_tweet(tweet: Dict, source: str) -> CandidateTweet:
+    tweet_id = str(tweet.get("id", "")).strip()
+    author = tweet.get("author") or {}
+    handle = (author.get("userName", "") if isinstance(author, dict) else "").lstrip("@")
+    url = tweet.get("url") or (f"https://x.com/{handle}/status/{tweet_id}" if handle and tweet_id else "")
+    return CandidateTweet(url=url, source=source, tweet_id=tweet_id, author_handle=handle, tweet=tweet)
+
+
+def _collect_one_twitterapi_source(
+    fetch_page,
+    source_key: str,
+    source_label: str,
+    store: SeenStore,
+    state: PollState,
+    now: str,
+    max_pages: int,
+    bootstrap_pages: int,
+) -> List[CandidateTweet]:
+    high_water = state.get_high_water(source_key)
+    cursor = ""
+    page_count = 0
+    new_candidates: List[CandidateTweet] = []
+    seen_this_run: List[str] = []
+    stop = False
+    page_limit = max(1, bootstrap_pages if not high_water else max_pages)
+
+    while page_count < page_limit and not stop:
+        page = fetch_page(cursor)
+        page_count += 1
+        tweets = page.tweets or []
+        if not tweets:
+            break
+
+        for tweet in tweets:
+            candidate = _candidate_from_twitterapi_tweet(tweet, source_label)
+            tweet_id = candidate.tweet_id
+            if not tweet_id:
+                continue
+            seen_this_run.append(tweet_id)
+
+            if not high_water:
+                store.mark_seen(tweet_id, candidate.url or f"https://x.com/i/status/{tweet_id}", source_label, now)
+                continue
+
+            if store.is_seen(tweet_id) or not _tweet_id_newer(tweet_id, high_water):
+                stop = True
+                break
+
+            store.mark_seen(tweet_id, candidate.url or f"https://x.com/i/status/{tweet_id}", source_label, now)
+            new_candidates.append(candidate)
+
+        if stop or not page.next_cursor:
+            break
+        cursor = page.next_cursor
+
+    max_seen = _max_tweet_id(seen_this_run)
+    if max_seen and _tweet_id_newer(max_seen, high_water):
+        state.set_high_water(source_key, max_seen)
+
+    new_candidates.sort(key=lambda c: int(c.tweet_id) if c.tweet_id.isdigit() else 0)
+    return new_candidates
+
+
+def _collect_twitterapi_io_candidates(config: Dict, store: SeenStore, state: PollState, now: str) -> List[CandidateTweet]:
+    api_config = config.get("twitterapi_io") or {}
+    if not api_config:
+        return []
+
+    api_key_env = api_config.get("api_key_env", "TWITTERAPI_IO_KEY")
+    api_key = os.environ.get(api_key_env, "")
+    if not api_key:
+        raise RuntimeError(f"{api_key_env} is not set")
+
+    client = TwitterApiIoClient(api_key=api_key, timeout=int(api_config.get("timeout_seconds", 20)))
+    max_pages = int(api_config.get("max_pages_per_run", 3))
+    bootstrap_pages = int(api_config.get("bootstrap_pages", 3))
+    candidates: List[CandidateTweet] = []
+
+    list_id = str(api_config.get("list_id", "")).strip()
+    if list_id:
+        candidates.extend(
+            _collect_one_twitterapi_source(
+                fetch_page=lambda cursor: client.list_timeline(list_id, cursor=cursor),
+                source_key=f"list:{list_id}",
+                source_label="following",
+                store=store,
+                state=state,
+                now=now,
+                max_pages=max_pages,
+                bootstrap_pages=bootstrap_pages,
+            )
+        )
+
+    include_replies = bool(api_config.get("include_replies", False))
+    for handle in api_config.get("following_handles", []):
+        clean_handle = str(handle).strip().lstrip("@")
+        if not clean_handle:
+            continue
+        candidates.extend(
+            _collect_one_twitterapi_source(
+                fetch_page=lambda cursor, h=clean_handle: client.user_last_tweets(
+                    h,
+                    cursor=cursor,
+                    include_replies=include_replies,
+                ),
+                source_key=f"user:{clean_handle.lower()}",
+                source_label="following",
+                store=store,
+                state=state,
+                now=now,
+                max_pages=max_pages,
+                bootstrap_pages=bootstrap_pages,
+            )
+        )
+
+    return candidates
 
 
 def _normalize_nitter_host(instance: str) -> str:
@@ -383,6 +588,19 @@ def _collect_candidates(config: Dict, fetcher_script: str, discover_script: str)
     return unique
 
 
+def _collect_candidates_with_state(
+    config: Dict,
+    fetcher_script: str,
+    discover_script: str,
+    store: SeenStore,
+    state: PollState,
+    now: str,
+) -> List[CandidateTweet]:
+    if config.get("twitterapi_io"):
+        return _collect_twitterapi_io_candidates(config, store, state, now)
+    return _collect_candidates(config, fetcher_script, discover_script)
+
+
 def _fetch_tweet_details(fetcher_script: str, url: str) -> Dict:
     cmd = ["python3", fetcher_script, "--url", url]
     p = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -398,6 +616,35 @@ def _fetch_tweet_details(fetcher_script: str, url: str) -> Dict:
         raise RuntimeError(data["error"])
 
     return data
+
+
+def _details_from_twitterapi_candidate(candidate: CandidateTweet) -> Dict:
+    tweet = candidate.tweet or {}
+    author = tweet.get("author") or {}
+    if not isinstance(author, dict):
+        author = {}
+    tweet_id = candidate.tweet_id or str(tweet.get("id", ""))
+    screen_name = candidate.author_handle or author.get("userName", "")
+    return {
+        "tweet_id": tweet_id,
+        "username": screen_name,
+        "tweet": {
+            "author": {
+                "name": author.get("name", screen_name),
+                "screen_name": screen_name,
+            },
+            "screen_name": screen_name,
+            "text": tweet.get("text", "") or "",
+            "created_at": tweet.get("createdAt", "") or "",
+            "likes": tweet.get("likeCount", 0),
+            "retweets": tweet.get("retweetCount", 0),
+            "views": tweet.get("viewCount", 0),
+            "replies_count": tweet.get("replyCount", 0),
+            "is_note_tweet": False,
+            "lang": tweet.get("lang", "") or "",
+            "quote": tweet.get("quoted_tweet"),
+        },
+    }
 
 
 def _author_name(tweet: Dict) -> str:
@@ -606,20 +853,21 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
     now = dt.datetime.now(dt.timezone.utc).isoformat()
 
     try:
-        candidates = _collect_candidates(config, fetcher_script, discover_script)
+        state = PollState(config.get("poll_state_path", "./data/poll_state.json"))
+        candidates = _collect_candidates_with_state(config, fetcher_script, discover_script, store, state, now)
         logging.info("collected %d candidates", len(candidates))
 
         for c in candidates:
             if len(out) >= max_new_items:
                 break
             candidate_tweet_id = c.tweet_id or _tweet_id_from_url(c.url)
-            if candidate_tweet_id and store.is_seen(candidate_tweet_id):
+            if candidate_tweet_id and store.is_seen(candidate_tweet_id) and not c.tweet:
                 continue
             try:
-                details = _fetch_tweet_details(fetcher_script, c.url)
+                details = _details_from_twitterapi_candidate(c) if c.tweet else _fetch_tweet_details(fetcher_script, c.url)
                 tweet = details.get("tweet", {})
                 tweet_id = details.get("tweet_id") or candidate_tweet_id or c.url.rsplit("/", 1)[-1]
-                if store.is_seen(tweet_id):
+                if store.is_seen(tweet_id) and not c.tweet:
                     continue
 
                 text = _extract_text(tweet)
