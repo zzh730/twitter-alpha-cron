@@ -4,9 +4,11 @@
 
 - `twitterapi_io.list_id`: 每 5 分钟拉取这个 X List 的最新内容
 - `TWITTERAPI_IO_KEY`: TwitterAPI.io API key，从环境变量读取
+- `GEMINI_API_KEY`: Gemini API key，用来把每条推文总结成中文 1-2 句话
 - `poll_state_path`: 记录每个来源最新见过的 tweet id
 - 首次运行只建立 baseline，不发送历史推文
 - 后续运行会继续翻页，直到遇到已见过的 tweet id 或达到 `max_pages_per_run`
+- 输出只包含每条推文的中文投资摘要和 URL
 
 如果没有配置 `twitterapi_io`，会退回旧的 `x-tweet-fetcher` 两段式抓取：
 
@@ -32,6 +34,7 @@ cp config.example.yaml config.yaml
 - `TWITTERAPI_IO_KEY`: 放在环境变量里，不要写进配置文件
 - `twitterapi_io.max_pages_per_run`: 每轮最多翻几页；每页最多 20 条
 - `twitterapi_io.bootstrap_pages`: 首次建基线最多翻几页
+- `summary.model`: 默认 `gemini-3-flash-preview`
 - `x_fetcher_repo_dir`: `x-tweet-fetcher` 路径；默认已指向 repo 内置的 `third_party/x_tweet_fetcher`
 - `following_handles`: 你想优先看的账户
 - `feed_keywords`: fallback 搜索词

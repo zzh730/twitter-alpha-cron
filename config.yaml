@@ -6,6 +6,11 @@
     "bootstrap_pages": 3,
     "include_replies": false
   },
+  "summary": {
+    "api_key_env": "GEMINI_API_KEY",
+    "model": "gemini-3.1-flash-lite",
+    "require_gemini": true
+  },
   "fetcher_script": "/Users/zzh/.openclaw/workspace/skills/x-tweet-fetcher/scripts/fetch_tweet.py",
   "dedup_db": "./data/seen_tweets.db",
   "poll_state_path": "./data/poll_state.json",
@@ -22,6 +27,16 @@
     "TJ_Research",
     "AntonLaVay",
     "aleabitoreddit",
+    "IamRamenPanda",
+    "pennycheck",
+    "diyas_1989",
+    "Franktradinglog",
+    "Ren_aramb",
+    "zephyr_z9",
+    "jukan05",
+    "tradergokux",
+    "ParadisLabs",
+    "bubbleunoffical",
     "david88lee"
   ],
   "feed_keywords": [

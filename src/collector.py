@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
 from analysis import analyze_text
 from storage import SeenStore
 
@@ -686,6 +691,58 @@ def _format_text_line(text: str) -> str:
     return (text or "").replace(chr(10), " ").strip()
 
 
+def _extract_gemini_text(data: Dict) -> str:
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return ""
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts") or []
+    texts = [str(part.get("text", "")).strip() for part in parts if part.get("text")]
+    return "\n".join(texts).strip()
+
+
+def _fallback_summary_cn(text: str, analysis: Dict) -> str:
+    tickers = analysis.get("tickers", [])
+    macro_tags = analysis.get("macro_tags", [])
+    focus = []
+    if tickers:
+        focus.append(f"相关标的：{_join_or_default(tickers)}")
+    if macro_tags:
+        focus.append(f"宏观主题：{_format_macro_tags(macro_tags)}")
+    prefix = "；".join(focus)
+    compact = _format_text_line(text)[:140]
+    if prefix:
+        return f"{prefix}。原文要点：{compact}"
+    return f"原文要点：{compact}"
+
+
+def _summarize_tweet_cn(text: str, url: str, analysis: Dict, config: Dict) -> str:
+    summary_config = config.get("summary") or {}
+    api_key_env = summary_config.get("api_key_env", "GEMINI_API_KEY")
+    api_key = os.environ.get(api_key_env, "")
+    if not api_key:
+        if summary_config.get("require_gemini", True):
+            raise RuntimeError(f"{api_key_env} is not set")
+        return _fallback_summary_cn(text, analysis)
+    if genai is None:
+        raise RuntimeError("google-genai is not installed")
+
+    model = summary_config.get("model", "gemini-3-flash-preview")
+    prompt = (
+        "请把下面这条 X/Twitter 原文总结成中文 1-2 句话。\n"
+        "要求：只输出总结正文；不要 Markdown；不要标题；不要加 URL；不能遗漏关键投资信息，"
+        "包括股票代码、公司、宏观数据、价格/比例/时间、方向性判断、风险点。\n\n"
+        f"URL: {url}\n"
+        f"原文: {text}"
+    )
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model=model, contents=prompt)
+    summary = getattr(response, "text", "") or ""
+    if not summary:
+        raise RuntimeError("Gemini returned an empty summary")
+    return _format_text_line(summary)
+
+
 def _format_number(value) -> str:
     try:
         return f"{int(value):,}"
@@ -792,50 +849,12 @@ def _format_markdown(items: List[Dict], target_handles: List[str]) -> str:
     if not items:
         return "本轮去重后没有新的推文。"
 
-    target_set = {_normalize_handle(h) for h in target_handles}
-    target_items = [it for it in items if _is_target_user(it, target_handles)]
-    other_items = [it for it in items if not _is_target_user(it, target_handles)]
-
     lines = ["# X 交易监控摘要", ""]
-
-    if target_items:
-        lines.extend(["## 重点观察账户", ""])
-        ordered_handles = []
-        seen_handles = set()
-        for handle in target_handles:
-            normalized = _normalize_handle(handle)
-            if normalized and normalized not in seen_handles:
-                ordered_handles.append(normalized)
-                seen_handles.add(normalized)
-        for item in target_items:
-            normalized = _normalize_handle(item.get("screen_name", ""))
-            if normalized and normalized not in seen_handles:
-                ordered_handles.append(normalized)
-                seen_handles.add(normalized)
-
-        block_index = 1
-        for handle in ordered_handles:
-            author_items = [it for it in target_items if _normalize_handle(it.get("screen_name", "")) == handle]
-            if not author_items:
-                continue
-            author_name = author_items[0].get("author") or handle
-            lines.extend(
-                [
-                    f"### {block_index}. {author_name} (@{handle})",
-                    f"- 本轮整体观点：{_author_holistic_view(author_items)}",
-                    f"- 新推文数：{len(author_items)}",
-                    "",
-                ]
-            )
-            for idx, item in enumerate(author_items, start=1):
-                lines.extend(_format_item_lines(item, idx, include_trading_view=True))
-            block_index += 1
-
-    if other_items:
-        lines.extend(["## 其他市场推文", ""])
-        for idx, item in enumerate(other_items, start=1):
-            lines.extend(_format_item_lines(item, idx, include_trading_view=False))
-
+    for idx, item in enumerate(items, start=1):
+        summary = item.get("chinese_summary") or _fallback_summary_cn(item.get("text", ""), item)
+        lines.append(f"{idx}. {summary}")
+        lines.append(f"   {item['url']}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -875,6 +894,7 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
                     continue
 
                 analysis = analyze_text(text)
+                chinese_summary = _summarize_tweet_cn(text, c.url, analysis, config)
 
                 record = {
                     "url": c.url,
@@ -891,6 +911,7 @@ def run(config_path: str) -> Tuple[List[Dict], str]:
                     "is_note_tweet": tweet.get("is_note_tweet", False),
                     "lang": tweet.get("lang", ""),
                     "quote": tweet.get("quote"),
+                    "chinese_summary": chinese_summary,
                     **analysis,
                 }
                 out.append(record)

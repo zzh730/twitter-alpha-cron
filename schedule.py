@@ -36,9 +36,11 @@ def main() -> int:
     parse_interval(args.interval)
 
     root = Path(__file__).resolve().parent
+    python_bin = root / ".venv" / "bin" / "python"
+    runner = str(python_bin) if python_bin.exists() else "python3"
     cmd_text = (
         "Run this command with the exec tool, then return only the markdown report content:\n"
-        f"cd {root} && python3 run_once.py --config {args.config}"
+        f"cd {root} && {runner} run_once.py --config {args.config}"
     )
 
     cmd = [

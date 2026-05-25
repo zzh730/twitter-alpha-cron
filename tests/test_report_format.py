@@ -11,7 +11,7 @@ import collector  # noqa: E402
 
 
 class ReportFormatTest(unittest.TestCase):
-    def test_format_markdown_highlights_target_accounts_in_chinese(self):
+    def test_format_markdown_outputs_only_chinese_summary_and_url_per_tweet(self):
         items = [
             {
                 "url": "https://x.com/zerohedge/status/111",
@@ -32,6 +32,7 @@ class ReportFormatTest(unittest.TestCase):
                 "sentiment_score": 3,
                 "tickers": ["XOM"],
                 "macro_tags": ["energy"],
+                "chinese_summary": "原油突破带动风险资产走强，重点关注 XOM 等能源股的顺势机会。",
             },
             {
                 "url": "https://x.com/news/status/222",
@@ -52,17 +53,20 @@ class ReportFormatTest(unittest.TestCase):
                 "sentiment_score": 0,
                 "tickers": [],
                 "macro_tags": ["inflation"],
+                "chinese_summary": "CPI 低于预期，可能缓和利率压力，对风险资产偏正面。",
             },
         ]
 
         md = collector._format_markdown(items, ["zerohedge"])
 
         self.assertIn("# X 交易监控摘要", md)
-        self.assertIn("## 重点观察账户", md)
-        self.assertIn("- 本轮整体观点：", md)
-        self.assertIn("- 交易/市场解读：", md)
-        self.assertIn("## 其他市场推文", md)
-        self.assertLess(md.index("## 重点观察账户"), md.index("## 其他市场推文"))
+        self.assertIn("1. 原油突破带动风险资产走强", md)
+        self.assertIn("https://x.com/zerohedge/status/111", md)
+        self.assertIn("2. CPI 低于预期", md)
+        self.assertNotIn("情绪判断", md)
+        self.assertNotIn("互动数据", md)
+        self.assertNotIn("原文：", md)
+        self.assertNotIn("重点观察账户", md)
 
     def test_format_markdown_empty_state_is_chinese(self):
         self.assertEqual(collector._format_markdown([], []), "本轮去重后没有新的推文。")

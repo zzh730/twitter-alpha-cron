@@ -129,10 +129,17 @@ class TwitterApiIoTest(unittest.TestCase):
                     "list_timeline",
                     return_value=collector.TwitterApiPage(tweets=[tweet(101, "trader")], next_cursor=""),
                 ):
-                    items, md = collector.run(str(config_path))
+                    with patch.object(
+                        collector,
+                        "_summarize_tweet_cn",
+                        return_value="NVDA 财报更新强化 AI 交易主线，关注盈利预期变化。",
+                    ):
+                        items, md = collector.run(str(config_path))
 
             self.assertEqual([item["tweet_id"] for item in items], ["101"])
-            self.assertIn("trader (@trader)", md)
+            self.assertEqual(items[0]["chinese_summary"], "NVDA 财报更新强化 AI 交易主线，关注盈利预期变化。")
+            self.assertIn("NVDA 财报更新强化 AI 交易主线", md)
+            self.assertIn("https://x.com/trader/status/101", md)
 
 
 if __name__ == "__main__":
